@@ -10,10 +10,56 @@ use cli::commands::{Cli, Commands};
 use indicatif::{ProgressBar, ProgressStyle};
 use models::config::GlobalConfig;
 use models::manifest::{WorkspaceDetails, WorkspaceManifest};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
+use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 use utils::context::find_workspace_root;
+
+fn bare_repo_cache_key(git_url: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(git_url.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn bare_repo_path(cache_dir: &Path, git_url: &str) -> PathBuf {
+    cache_dir.join(bare_repo_cache_key(git_url))
+}
+
+fn validate_workspace_subpath(name: &str) -> Result<()> {
+    let name_path = Path::new(name);
+    if name_path.is_absolute()
+        || name_path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(anyhow!(
+            "Workspace name must be a relative path under the current directory"
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_named_workspace(name: &str) -> Result<PathBuf> {
+    validate_workspace_subpath(name)?;
+    let cwd = env::current_dir()?.canonicalize()?;
+    let workspace_root = cwd.join(name);
+    if !workspace_root.exists() {
+        return Err(anyhow!("Workspace not found at {:?}", workspace_root));
+    }
+    let workspace_root = workspace_root.canonicalize()?;
+    if !workspace_root.starts_with(&cwd) {
+        return Err(anyhow!(
+            "Workspace path must stay within the current directory"
+        ));
+    }
+
+    Ok(workspace_root)
+}
 
 async fn handle_init() -> Result<()> {
     let cwd = env::current_dir()?;
@@ -43,6 +89,7 @@ async fn handle_init() -> Result<()> {
 }
 
 async fn handle_create(name: &str) -> Result<()> {
+    validate_workspace_subpath(name)?;
     let mut cwd = env::current_dir()?;
     cwd.push(name);
 
@@ -69,10 +116,7 @@ async fn handle_create(name: &str) -> Result<()> {
 
 async fn handle_edit(name: Option<String>) -> Result<()> {
     let manifest_path = if let Some(n) = name {
-        let mut p = env::current_dir()?;
-        p.push(n);
-        p.push("myspace.toml");
-        p
+        resolve_named_workspace(&n)?.join("myspace.toml")
     } else {
         find_workspace_root()
             .ok_or_else(|| anyhow!("Not in a myspace workspace"))?
@@ -84,7 +128,10 @@ async fn handle_edit(name: Option<String>) -> Result<()> {
     }
 
     let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
-    Command::new(editor).arg(&manifest_path).status().await?;
+    let status = Command::new(&editor).arg(&manifest_path).status().await?;
+    if !status.success() {
+        return Err(anyhow!("Editor '{}' exited unsuccessfully", editor));
+    }
 
     Ok(())
 }
@@ -113,9 +160,7 @@ async fn handle_add(target: &str) -> Result<()> {
 
     // Determine bare repo path
     let cache_dir = utils::paths::get_bare_repos_dir()?;
-    // For simplicity, just use the hash of the URL or a sanitised version.
-    let repo_name = git_url.replace("/", "_").replace(":", "_");
-    let bare_repo_path = cache_dir.join(&repo_name);
+    let bare_repo_path = bare_repo_path(&cache_dir, &git_url);
 
     git::engine::clone_bare(&git_url, &bare_repo_path).await?;
 
@@ -141,43 +186,55 @@ async fn handle_add(target: &str) -> Result<()> {
 
 async fn handle_delete(name: Option<String>) -> Result<()> {
     let workspace_root = if let Some(n) = name {
-        let mut p = env::current_dir()?;
-        p.push(n);
-        p
+        resolve_named_workspace(&n)?
     } else {
-        find_workspace_root().ok_or_else(|| anyhow!("Not in a myspace workspace"))?
+        find_workspace_root()
+            .ok_or_else(|| anyhow!("Not in a myspace workspace"))?
+            .canonicalize()?
     };
 
     if !workspace_root.exists() {
         return Err(anyhow!("Workspace not found at {:?}", workspace_root));
     }
 
-    let current_dir = env::current_dir()?;
+    let manifest_path = workspace_root.join("myspace.toml");
+    if !manifest_path.exists() {
+        return Err(anyhow!("Manifest not found at {:?}", manifest_path));
+    }
+    let manifest = WorkspaceManifest::load(&manifest_path)?;
+
+    let current_dir = env::current_dir()?.canonicalize()?;
     if current_dir.starts_with(&workspace_root) {
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("Cannot find home directory"))?;
-        env::set_current_dir(&home)?;
-        println!("Moved execution context to home directory to allow deletion.");
+        let mut fallback_dirs = Vec::new();
+        if let Some(home) = dirs::home_dir().and_then(|path| path.canonicalize().ok()) {
+            fallback_dirs.push(home);
+        }
+        if let Some(parent) = workspace_root
+            .parent()
+            .and_then(|path| path.canonicalize().ok())
+        {
+            fallback_dirs.push(parent);
+        }
+        fallback_dirs.push(env::temp_dir());
+
+        let fallback_dir = fallback_dirs
+            .into_iter()
+            .find(|path| !path.starts_with(&workspace_root))
+            .ok_or_else(|| anyhow!("Cannot determine a safe directory outside the workspace"))?;
+        env::set_current_dir(&fallback_dir)?;
+        println!(
+            "Moved execution context to {:?} to allow deletion.",
+            fallback_dir
+        );
     }
 
-    // Read subdirectories to find git worktrees and remove them via git worktree remove
     let cache_dir = utils::paths::get_bare_repos_dir()?;
-    let entries = fs::read_dir(&workspace_root)?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() && path.join(".git").exists() {
-            // Find which bare repo this belongs to. Since we don't store it explicitly,
-            // we will search the cache directory for a bare repo that lists this worktree.
-            // A more robust solution would store this in `myspace.toml`.
-            // For now, we iterate over the bare repos and try to remove the worktree.
-            if let Ok(bare_repos) = fs::read_dir(&cache_dir) {
-                for bare_repo_entry in bare_repos.flatten() {
-                    let bare_repo_path = bare_repo_entry.path();
-                    if bare_repo_path.is_dir() {
-                        let _ = git::engine::remove_worktree(&bare_repo_path, &path).await;
-                    }
-                }
+    for (worktree_name, repo_url) in &manifest.repositories {
+        let worktree_path = workspace_root.join(worktree_name);
+        if worktree_path.is_dir() && worktree_path.join(".git").exists() {
+            let bare_repo_path = bare_repo_path(&cache_dir, repo_url);
+            if bare_repo_path.is_dir() {
+                git::engine::remove_worktree(&bare_repo_path, &worktree_path).await?;
             }
         }
     }

@@ -7,7 +7,7 @@
 *   **Zero-Overhead Cloning:** Uses centralized bare repositories (stored in your OS's native data directory) to create ultra-fast local Git worktrees.
 *   **Hierarchical Target Engine:** Smart parsing syntax allowing you to clone repositories using simple aliases, organization names, or full providers (`repo`, `org/repo`, `//alias/org/repo`).
 *   **Context Aware:** Commands detect if you are inside an active workspace directory recursively, meaning you don't have to specify workspace names once you are working inside one.
-*   **Cross Platform:** Native paths, configurations, and releases for Linux, macOS, and Windows.
+*   **Cross Platform:** Native paths and configurations for Linux, macOS, and Windows, with release binaries currently published for Linux and macOS.
 
 ## Installation
 
@@ -19,7 +19,11 @@ cargo install --path .
 
 ## Configuration
 
-`myspace` utilizes a global configuration file typically located at `~/.config/myspace/config.toml` (on Linux/macOS) to define default SCM providers and custom aliases.
+`myspace` utilizes a global configuration file to define default SCM providers and custom aliases:
+
+* Linux: `~/.config/myspace/config.toml`
+* macOS: `~/Library/Application Support/com.myspace.myspace/config.toml`
+* Windows: `%APPDATA%\myspace\myspace\config\config.toml`
 
 Example `config.toml`:
 

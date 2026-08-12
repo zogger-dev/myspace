@@ -45,6 +45,7 @@ pub async fn add_worktree(bare_repo_path: &Path, worktree_path: &Path) -> Result
     let status = Command::new("git")
         .arg("worktree")
         .arg("add")
+        .arg("--detach")
         .arg(worktree_path)
         .current_dir(bare_repo_path)
         .stderr(Stdio::null())
@@ -61,7 +62,6 @@ pub async fn add_worktree(bare_repo_path: &Path, worktree_path: &Path) -> Result
 
 /// Removes a worktree from a bare repository.
 pub async fn remove_worktree(bare_repo_path: &Path, worktree_path: &Path) -> Result<()> {
-    use std::process::Stdio;
     let status = Command::new("git")
         .arg("worktree")
         .arg("remove")
