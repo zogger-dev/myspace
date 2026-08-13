@@ -18,8 +18,17 @@ fn create_fetch_options<'a>(spinner: Option<&'a ProgressBar>) -> FetchOptions<'a
         });
     }
 
-    callbacks.credentials(|_user, username_from_url, _allowed_types| {
-        Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+    callbacks.credentials(|_url, username_from_url, allowed_types| {
+        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+            let user = username_from_url.unwrap_or("git");
+            Cred::ssh_key_from_agent(user)
+        } else if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+            Cred::default()
+        } else if allowed_types.contains(git2::CredentialType::DEFAULT) {
+            Cred::default()
+        } else {
+            Err(git2::Error::from_str("no credentials available"))
+        }
     });
 
     let mut fetch_options = FetchOptions::new();
