@@ -10,11 +10,17 @@
 *   **Switchable Views:** The space's canonical checkouts sit at trunk by default and can be pointed at any branch set for review, without stealing the branch from whoever is working on it.
 *   **Context Aware:** Commands detect the enclosing space from your working directory.
 *   **Self-Contained:** All git operations go through libgit2 — no `git` binary is required at runtime. SSH authentication uses your SSH agent.
-*   **Cross Platform:** Linux, macOS, and Windows, with release binaries currently published for Linux and macOS.
+*   **Cross Platform:** Linux, macOS, and Windows.
 
 ## Installation
 
-You can download pre-compiled binaries from the GitHub Releases page. Alternatively, if you have Rust installed, you can build it from source:
+Via Homebrew:
+
+```bash
+brew install zogger-dev/tools/myspace
+```
+
+Or, with Rust installed, build from source:
 
 ```bash
 cargo install --path .
