@@ -162,7 +162,7 @@ async fn handle_add(target: &str) -> Result<()> {
     let cache_dir = utils::paths::get_bare_repos_dir()?;
     let bare_repo_path = bare_repo_path(&cache_dir, &git_url);
 
-    git::engine::clone_bare(&git_url, &bare_repo_path).await?;
+    git::engine::clone_bare(&git_url, &bare_repo_path, Some(&spinner)).await?;
 
     let worktree_name = match &parsed_target {
         models::target::Target::Bare(repo) => repo.clone(),
@@ -173,7 +173,7 @@ async fn handle_add(target: &str) -> Result<()> {
     let worktree_path = workspace_root.join(&worktree_name);
 
     spinner.set_message(format!("Provisioning worktree {}...", worktree_name));
-    git::engine::add_worktree(&bare_repo_path, &worktree_path).await?;
+    git::engine::add_worktree(&bare_repo_path, &worktree_path, Some(&spinner)).await?;
 
     let manifest_path = workspace_root.join("myspace.toml");
     let mut manifest = WorkspaceManifest::load(&manifest_path)?;
