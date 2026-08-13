@@ -18,6 +18,12 @@ pub struct GlobalConfig {
     /// e.g. bb = "bitbucket.org". Identity only — never a transport string.
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+    /// Path to the SSH agent socket to authenticate with, e.g. 1Password's
+    /// agent. libgit2 does not read `~/.ssh/config`, so an `IdentityAgent`
+    /// directive there is invisible to it — it only consults
+    /// `$SSH_AUTH_SOCK`. Setting this points that variable at the right
+    /// agent. Supports a leading `~/`.
+    pub ssh_agent: Option<String>,
     /// Per-host settings, keyed by hostname.
     #[serde(default)]
     pub hosts: HashMap<String, HostConfig>,
@@ -57,6 +63,11 @@ impl GlobalConfig {
     pub fn ssh_key_for(&self, host: &str) -> Option<PathBuf> {
         let raw = self.hosts.get(host)?.ssh_key.as_deref()?;
         Some(expand_tilde(raw))
+    }
+
+    /// The configured SSH agent socket, tilde-expanded, if any.
+    pub fn ssh_agent_socket(&self) -> Option<PathBuf> {
+        self.ssh_agent.as_deref().map(expand_tilde)
     }
 }
 

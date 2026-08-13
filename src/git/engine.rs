@@ -4,6 +4,7 @@ use git2::{
     StatusOptions, Worktree, WorktreeAddOptions, WorktreePruneOptions, build::RepoBuilder,
 };
 use indicatif::ProgressBar;
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,79 @@ use std::path::{Path, PathBuf};
 /// holding a real branch (e.g. a src/ trunk checkout on `main`) must never
 /// have that branch moved underneath it by a fetch.
 const FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
+
+/// One way to authenticate over SSH, tried in order until one succeeds.
+enum SshCandidate {
+    Agent,
+    Key(PathBuf),
+}
+
+/// libgit2 knows nothing of `~/.ssh/config`: it can consult the agent at
+/// `$SSH_AUTH_SOCK` (see `GlobalConfig::ssh_agent`) or read a key file
+/// directly. An explicitly configured key wins outright (IdentitiesOnly
+/// semantics); otherwise try the agent, then conventional key paths.
+fn ssh_candidates(explicit_key: Option<PathBuf>) -> Vec<SshCandidate> {
+    if let Some(key) = explicit_key {
+        return vec![SshCandidate::Key(key)];
+    }
+    let mut candidates = vec![SshCandidate::Agent];
+    if let Some(ssh_dir) = dirs::home_dir().map(|home| home.join(".ssh")) {
+        for name in [
+            "id_ed25519",
+            "id_ed25519_sk",
+            "id_ecdsa",
+            "id_ecdsa_sk",
+            "id_rsa",
+        ] {
+            let path = ssh_dir.join(name);
+            if path.is_file() {
+                candidates.push(SshCandidate::Key(path));
+            }
+        }
+    }
+    candidates
+}
+
+/// The `IdentityAgent` path from `~/.ssh/config`, if one is set. Used only
+/// to make the auth-failure message actionable — never to drive behavior,
+/// so a naive parse is fine here.
+fn identity_agent_hint() -> Option<String> {
+    let config = fs::read_to_string(dirs::home_dir()?.join(".ssh").join("config")).ok()?;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Keep scanning past lines without a value — `?` here would abandon
+        // the whole search on the first blank or malformed line.
+        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("identityagent") {
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+fn ssh_auth_help() -> String {
+    let mut msg = String::from(
+        "SSH authentication failed: no usable identity. libgit2 does not read \
+         ~/.ssh/config — it uses the agent at $SSH_AUTH_SOCK or an explicit key file",
+    );
+    match identity_agent_hint() {
+        Some(agent) => msg.push_str(&format!(
+            ".\n~/.ssh/config sets IdentityAgent {agent} — add this to ~/.myspace/config.toml:\n\
+             \n    ssh_agent = \"{agent}\"\n"
+        )),
+        None => msg.push_str(
+            ".\nLoad a key with `ssh-add <key>`, or set an explicit identity in \
+             ~/.myspace/config.toml:\n\n    [hosts.\"github.com\"]\n    \
+             ssh_key = \"~/.ssh/id_ed25519\"\n",
+        ),
+    }
+    msg
+}
 
 fn create_fetch_options(
     spinner: Option<&ProgressBar>,
@@ -35,17 +109,23 @@ fn create_fetch_options(
         });
     }
 
+    // libgit2 re-invokes this callback after each rejected credential, so
+    // walk the candidate list one entry per call and fail with guidance once
+    // every option is spent.
+    let candidates = ssh_candidates(ssh_key);
+    let next = Cell::new(0usize);
     callbacks.credentials(move |_url, username_from_url, allowed_types| {
         if allowed_types.contains(git2::CredentialType::SSH_KEY) {
             let user = username_from_url.unwrap_or("git");
-            // An explicit key is the IdentityFile+IdentitiesOnly equivalent —
-            // libgit2 doesn't read ~/.ssh/config, and agent key order decides
-            // identity otherwise.
-            match &ssh_key {
-                Some(key) => Cred::ssh_key(user, None, key, None),
-                None => Cred::ssh_key_from_agent(user),
-            }
-        } else if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT)
+            let index = next.get();
+            next.set(index + 1);
+            return match candidates.get(index) {
+                Some(SshCandidate::Agent) => Cred::ssh_key_from_agent(user),
+                Some(SshCandidate::Key(path)) => Cred::ssh_key(user, None, path, None),
+                None => Err(git2::Error::from_str(&ssh_auth_help())),
+            };
+        }
+        if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT)
             || allowed_types.contains(git2::CredentialType::DEFAULT)
         {
             Cred::default()

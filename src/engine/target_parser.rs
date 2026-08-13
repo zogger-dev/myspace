@@ -215,6 +215,7 @@ mod tests {
             default_host: "github.com".to_string(),
             default_org: "zogger-dev".to_string(),
             aliases,
+            ssh_agent: None,
             hosts: HashMap::new(),
         }
     }

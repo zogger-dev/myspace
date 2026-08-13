@@ -87,6 +87,19 @@ fn make_workspace(env: &TestEnv, name: &str) -> (Context, PathBuf) {
     (ctx_at(env, &ws), ws)
 }
 
+/// The rest of the suite clones from local filesystem paths, which use
+/// libgit2's always-present `local` transport — so no other test can catch a
+/// libgit2 built without SSH. That is exactly how a real regression shipped
+/// (git2 0.21 changed `default = []`, dropping the ssh feature), making every
+/// `git@host:…` clone fail with "unsupported URL protocol; class=Net".
+#[test]
+fn libgit2_has_ssh_transport_compiled_in() {
+    assert!(
+        git2::Version::get().ssh(),
+        "libgit2 was built without SSH support — check git2's `ssh` feature in Cargo.toml"
+    );
+}
+
 #[test]
 fn init_creates_manifest_and_refuses_twice() {
     let env = test_env();

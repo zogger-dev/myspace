@@ -40,13 +40,19 @@ default_org = "zogger-dev"
 gh = "github.com"               # aliases map to bare hostnames
 bb = "bitbucket.org"
 
+# Optional: authenticate through a specific SSH agent socket. Needed only
+# if your agent isn't the one in $SSH_AUTH_SOCK — e.g. 1Password's agent,
+# which ~/.ssh/config selects with IdentityAgent. libgit2 never reads
+# ~/.ssh/config, so that directive is invisible to it.
+# ssh_agent = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+
 [hosts."github.com"]
 # Optional explicit SSH identity (the IdentityFile+IdentitiesOnly
-# equivalent). libgit2 does not read ~/.ssh/config, and agent key order
-# decides identity otherwise — set this if you have multiple keys for
-# the same host.
+# equivalent), for when multiple keys for one host live in your agent.
 # ssh_key = "~/.ssh/work_ed25519"
 ```
+
+By default, authentication uses the agent at `$SSH_AUTH_SOCK`, then any conventional key in `~/.ssh/` (`id_ed25519`, `id_ecdsa`, `id_rsa`, …). If everything fails, the error names what to configure.
 
 The config file is required for `myspace add` — without it there is no way to resolve targets into clone URLs, and `myspace` will tell you what to create rather than guessing.
 

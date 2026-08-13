@@ -14,6 +14,19 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let ctx = Context::from_env()?;
 
+    // libgit2 authenticates against $SSH_AUTH_SOCK and never reads
+    // ~/.ssh/config, so an IdentityAgent directive there (1Password's agent,
+    // for instance) is invisible to it. Point the variable at the configured
+    // agent before any git work begins. Config is optional here: commands
+    // that don't touch remotes must still run without one.
+    if let Ok(config) = myspace::models::config::GlobalConfig::load(&ctx.config_path)
+        && let Some(socket) = config.ssh_agent_socket()
+    {
+        // SAFETY: single-threaded startup — no git, network, or other thread
+        // has been spawned yet, so nothing can be reading the environment.
+        unsafe { std::env::set_var("SSH_AUTH_SOCK", socket) };
+    }
+
     match cli.command {
         Commands::Init => ops::init(&ctx)?,
         Commands::Create { name } => ops::create(&ctx, &name)?,
