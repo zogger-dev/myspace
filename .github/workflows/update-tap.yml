@@ -1,0 +1,45 @@
+name: Update Homebrew tap
+
+# On every version tag, bump Formula/myspace.rb in zogger-dev/homebrew-tools
+# to the tag's source tarball. Requires the TAP_TOKEN secret: a fine-grained
+# PAT scoped to the homebrew-tools repo with Contents: read & write.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  bump-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute tarball checksum
+        id: info
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL "$URL" -o src.tar.gz
+          {
+            echo "version=${TAG#v}"
+            echo "url=$URL"
+            echo "sha=$(sha256sum src.tar.gz | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bump formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/zogger-dev/homebrew-tools.git" tap
+          cd tap
+          sed -i \
+            -e 's|^  url .*|  url "${{ steps.info.outputs.url }}"|' \
+            -e 's|^  sha256 .*|  sha256 "${{ steps.info.outputs.sha }}"|' \
+            -e 's|^  version .*|  version "${{ steps.info.outputs.version }}"|' \
+            Formula/myspace.rb
+          if git diff --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "myspace ${{ steps.info.outputs.version }}"
+          git push
