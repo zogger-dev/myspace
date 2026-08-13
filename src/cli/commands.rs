@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "myspace")]
+#[command(version)]
 #[command(about = "Multi-repo workspace manager using Git worktrees", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
