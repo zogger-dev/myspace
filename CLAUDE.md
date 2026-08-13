@@ -33,11 +33,11 @@ Library + thin binary: `src/main.rs` only dispatches clap commands into `src/ops
 - `engine/target_parser.rs` — target grammar + resolution (below), and `is_valid_component`, the **security boundary**: every name that ends up joined into a path (targets, manifest keys, identities, branch/set names) must pass it. It also bans `@` (the ref separator).
 - `git/engine.rs` — all git work, via libgit2 only (**never shell out to git**; auth = SSH agent or per-host `ssh_key` from config — libgit2 does not read `~/.ssh/config`). Worktree quirks live here: creation detaches via a scratch-branch dance (libgit2 has no detach flag), registrations are name-deduped (`free_worktree_name`) and stale ones pruned, removal is `prune` with `valid+working_tree` flags plus a manual dirty check. `owning_bare_repo` maps a worktree back to its bare repo via `commondir` — never re-derive cache paths from URLs.
 - `models/` — config (missing config is a **hard error** with setup guidance, never a default), manifest (`BTreeMap` so toml serializes deterministically), state, parsed target.
-- `utils/` — paths (`~/.myspace`), per-repo file locks (`std::fs::File::lock` on a sibling `<repo>.lock`; hold one around any cache mutation), space registry, workspace-root discovery (walks up looking for `.myspace/config.toml`).
+- `utils/` — paths (`~/.myspace`), file locks (`std::fs::File::lock`): a per-repo lock (sibling `<repo>.lock`) around any cache mutation and a per-space lock (`.myspace/lock`) around any manifest/state load→mutate→save sequence. **Lock ordering: space before repo, always** — every call path follows it, so the two can't deadlock. Also the space registry and workspace-root discovery (walks up looking for `.myspace/config.toml`).
 
 ## Target notation
 
-Three forms, each accepting an `@ref` suffix; parsing in `parse_target`, defaults filled by `resolve`:
+Three forms, each accepting an `@ref` suffix (parsed and carried, but rejected by `add` until dependency checkouts land); parsing in `parse_target`, defaults filled by `resolve`:
 
 ```
 mytool                            # bare → default_host + default_org

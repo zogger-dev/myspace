@@ -114,6 +114,19 @@ fn create_provisions_workspace_and_rejects_escapes() {
     assert!(ops::create(&ctx, "ws").is_err()); // already exists
     assert!(ops::create(&ctx, "../escape").is_err());
     assert!(ops::create(&ctx, "/abs/path").is_err());
+    // A space name is one component — it doubles as the branch namespace,
+    // and multi-segment names could traverse through symlinks.
+    assert!(ops::create(&ctx, "nested/space").is_err());
+    assert!(ops::create(&ctx, "bad name").is_err());
+}
+
+#[test]
+fn init_rejects_unusable_directory_names() {
+    let env = test_env();
+    let bad = env.root.join("bad name");
+    fs::create_dir_all(&bad).unwrap();
+    let err = ops::init(&ctx_at(&env, &bad)).unwrap_err();
+    assert!(err.to_string().contains("branch namespace"), "{}", err);
 }
 
 #[test]
@@ -162,6 +175,20 @@ fn add_provisions_worktree_from_shared_cache() {
     // Re-adding the same name fails cleanly.
     assert!(ops::add_resolved(&ctx, &ws, &resolved, None, None).is_err());
 
+    // A failed worktree creation must not leak its scratch branch into the
+    // cache (local heads are reserved for branch sets).
+    let blocked = ws.join("blocked");
+    fs::write(&blocked, "a file, not a directory").unwrap();
+    assert!(myspace::git::engine::add_worktree(&cache, &blocked, None).is_err());
+    assert_eq!(
+        cache_repo
+            .branches(Some(git2::BranchType::Local))
+            .unwrap()
+            .count(),
+        0,
+        "scratch branch leaked from failed worktree creation"
+    );
+
     // A second workspace reuses the cache (fetch path) rather than recloning.
     let (ctx2, ws2) = make_workspace(&env, "ws2");
     ops::add_resolved(&ctx2, &ws2, &resolved, None, None).unwrap();
@@ -194,7 +221,10 @@ fn add_rejects_ref_pins_for_now() {
         ..resolved
     };
     let err = ops::add_resolved(&ctx, &ws, &pinned, None, None).unwrap_err();
-    assert!(err.to_string().contains("--dep"), "{}", err);
+    // Must explain the situation without pointing at CLI options that don't
+    // exist yet.
+    assert!(err.to_string().contains("not usable"), "{}", err);
+    assert!(!err.to_string().contains("--dep"), "{}", err);
 }
 
 #[test]
@@ -298,6 +328,53 @@ fn branch_set_lifecycle() {
             .is_err(),
         "branch must be deleted with the set"
     );
+}
+
+#[test]
+fn branch_delete_refusal_leaves_set_intact() {
+    let env = test_env();
+    let repo_a = make_remote_named(&env, "repo-a");
+    let repo_b = make_remote_named(&env, "repo-b");
+    let (ctx, ws) = make_workspace(&env, "ws");
+    ops::add_resolved(&ctx, &ws, &repo_a, None, None).unwrap();
+    ops::add_resolved(&ctx, &ws, &repo_b, None, None).unwrap();
+    ops::branch(&ctx, "feat", &[], None).unwrap();
+
+    // Dirty only the second (sorted) entry: preflight must catch it before
+    // the first entry is destroyed.
+    fs::write(ws.join(".myspace/trees/feat/repo-b/README.md"), "dirty").unwrap();
+    let err = ops::branch_delete(&ctx, "feat", false, false).unwrap_err();
+    assert!(err.to_string().contains("uncommitted"), "{}", err);
+    assert!(
+        ws.join(".myspace/trees/feat/repo-a/README.md").exists(),
+        "refusal must not partially destroy the set"
+    );
+    assert!(ws.join(".myspace/trees/feat/repo-b/README.md").exists());
+}
+
+#[test]
+fn delete_deregisters_branch_set_worktrees() {
+    let env = test_env();
+    let repo_a = make_remote_named(&env, "repo-a");
+    let (ctx_ws, ws) = make_workspace(&env, "ws");
+    ops::add_resolved(&ctx_ws, &ws, &repo_a, None, None).unwrap();
+    ops::branch(&ctx_ws, "feat", &[], None).unwrap();
+
+    let ctx_root = ctx_at(&env, &env.root);
+    ops::delete(&ctx_root, Some("ws")).unwrap();
+    assert!(!ws.exists());
+
+    // No stale registrations may remain in the shared cache, and the branch
+    // must survive teardown but no longer count as checked out.
+    let cache = env.root.join("cache/local/testorg/repo-a");
+    let cache_repo = git2::Repository::open_bare(&cache).unwrap();
+    assert_eq!(cache_repo.worktrees().unwrap().iter().count(), 0);
+    let mut branch = cache_repo
+        .find_branch("ws/feat", git2::BranchType::Local)
+        .expect("branch refs must be preserved by space deletion");
+    branch
+        .delete()
+        .expect("branch must not appear checked out after deletion");
 }
 
 #[test]
@@ -434,15 +511,15 @@ fn status_reports_spaces_repos_and_branch_sets() {
     assert_eq!(status.view, "feat");
     assert_eq!(status.repos.len(), 1);
     assert!(status.repos[0].present);
-    assert!(!status.repos[0].dirty);
+    assert_eq!(status.repos[0].dirty, Some(false));
     assert_eq!(status.repos[0].identity, repo_a.identity());
 
     assert_eq!(status.branch_sets.len(), 1);
     let set = &status.branch_sets[0];
     assert_eq!(set.branch, "ws/feat");
     assert_eq!(set.repos.len(), 1);
-    assert!(set.repos[0].dirty, "uncommitted scratch file");
-    assert!(set.repos[0].needs_push, "local-only commit");
+    assert_eq!(set.repos[0].dirty, Some(true), "uncommitted scratch file");
+    assert_eq!(set.repos[0].needs_push, Some(true), "local-only commit");
 
     // The JSON shape serializes.
     let json = serde_json::to_string(&status).unwrap();

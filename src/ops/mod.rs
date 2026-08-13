@@ -188,6 +188,15 @@ pub fn init(ctx: &Context) -> Result<()> {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
+    // The space name doubles as the branch namespace — a directory name that
+    // can't serve as one must fail here, not on the first `branch` command.
+    if !is_valid_component(&name) {
+        return Err(anyhow!(
+            "Directory name '{}' cannot be used as a space name (it becomes the \
+             branch namespace) — use `myspace create <name>` with a valid name instead",
+            name
+        ));
+    }
     init_space_at(&ctx.cwd, &name, "Auto-generated workspace".to_string())?;
     registry::register_space(&ctx.registry_path, &ctx.cwd)?;
     println!("Initialized myspace workspace in {:?}", ctx.cwd);
@@ -195,7 +204,15 @@ pub fn init(ctx: &Context) -> Result<()> {
 }
 
 pub fn create(ctx: &Context, name: &str) -> Result<()> {
-    validate_workspace_subpath(name)?;
+    // A single validated component, not just a relative subpath: the name
+    // becomes the branch namespace, and multi-segment names could traverse
+    // through symlinked intermediate directories out of cwd.
+    if !is_valid_component(name) {
+        return Err(anyhow!(
+            "Invalid space name '{}' — a single path component is required",
+            name
+        ));
+    }
     let workspace_dir = ctx.cwd.join(name);
 
     if workspace_dir.exists() {
@@ -276,9 +293,16 @@ pub fn add_resolved(
 ) -> Result<()> {
     if resolved.git_ref.is_some() {
         return Err(anyhow!(
-            "@ref pins apply to dependency checkouts (--dep), which aren't implemented yet"
+            "'@ref' pins are parsed but not usable with `add` yet — pinned \
+             dependency checkouts are planned; drop the '@{}' suffix to add \
+             the repo at trunk",
+            resolved.git_ref.as_deref().unwrap_or_default()
         ));
     }
+
+    // Space lock across the whole load→mutate→save sequence; without it two
+    // concurrent adds of different repos would each save a stale manifest.
+    let _space_lock = lock::lock_space(workspace_root)?;
 
     let worktree_name = resolved.repo.clone();
     let worktree_path = workspace_root.join(&worktree_name);
@@ -332,6 +356,7 @@ pub fn remove(ctx: &Context, name: &str, force: bool) -> Result<()> {
         return Err(anyhow!("Invalid repository name '{}'", name));
     }
     let root = workspace_root(ctx)?;
+    let _space_lock = lock::lock_space(&root)?;
     let manifest_path = space_config_path(&root);
     let mut manifest = WorkspaceManifest::load(&manifest_path)?;
 
@@ -376,6 +401,7 @@ pub fn delete(ctx: &Context, name: Option<&str>) -> Result<()> {
     if !manifest_path.exists() {
         return Err(anyhow!("Manifest not found at {:?}", manifest_path));
     }
+    let space_lock = lock::lock_space(&workspace_root)?;
     let manifest = WorkspaceManifest::load(&manifest_path)?;
 
     // On Windows a process cannot delete its own cwd, and on any platform the
@@ -420,6 +446,29 @@ pub fn delete(ctx: &Context, name: Option<&str>) -> Result<()> {
         }
     }
 
+    // Branch-set worktrees must be deregistered through the git engine too —
+    // deleting them as plain directories would leave stale registrations in
+    // the shared caches with their branches appearing checked out forever.
+    // Branch refs are kept: teardown of the space must not destroy work.
+    let trees_dir = space_trees_dir(&workspace_root);
+    if trees_dir.is_dir() {
+        for set_entry in fs::read_dir(&trees_dir)? {
+            let set_dir = set_entry?.path();
+            if !set_dir.is_dir() {
+                continue;
+            }
+            for worktree_entry in fs::read_dir(&set_dir)? {
+                let worktree_path = worktree_entry?.path();
+                if worktree_path.is_dir() {
+                    remove_worktree_dir(&worktree_path, true)?;
+                }
+            }
+        }
+    }
+
+    // The lock file lives inside the space; release it before deleting the
+    // tree (required on Windows, harmless elsewhere).
+    drop(space_lock);
     fs::remove_dir_all(&workspace_root)?;
     registry::unregister_space(&ctx.registry_path, &workspace_root)?;
     println!("Deleted workspace at {:?}", workspace_root);
@@ -443,6 +492,7 @@ pub fn branch(ctx: &Context, name: &str, repos: &[String], from: Option<&str>) -
     }
 
     let root = workspace_root(ctx)?;
+    let _space_lock = lock::lock_space(&root)?;
     let manifest = WorkspaceManifest::load(&space_config_path(&root))?;
     let full_branch = space_branch(&manifest, name)?;
     let set_dir = space_trees_dir(&root).join(name);
@@ -459,6 +509,11 @@ pub fn branch(ctx: &Context, name: &str, repos: &[String], from: Option<&str>) -
     };
 
     for repo_name in &repos {
+        // Names may come straight from the hand-edited manifest (default-all
+        // path) and get joined into set_dir — validate before any path use.
+        if !is_valid_component(repo_name) {
+            return Err(anyhow!("Invalid repository name '{}'", repo_name));
+        }
         let identity = manifest.repositories.get(repo_name).ok_or_else(|| {
             anyhow!(
                 "'{}' is not a member of this space — `myspace add` it first",
@@ -519,6 +574,7 @@ pub fn branch_delete(ctx: &Context, name: &str, force: bool, keep_branch: bool) 
         return Err(anyhow!("Invalid branch set name '{}'", name));
     }
     let root = workspace_root(ctx)?;
+    let _space_lock = lock::lock_space(&root)?;
     let manifest = WorkspaceManifest::load(&space_config_path(&root))?;
     let full_branch = space_branch(&manifest, name)?;
     let set_dir = space_trees_dir(&root).join(name);
@@ -534,25 +590,44 @@ pub fn branch_delete(ctx: &Context, name: &str, force: bool, keep_branch: bool) 
         .collect();
     entries.sort();
 
+    // Preflight every entry before touching anything: a refusal on the third
+    // repo must not leave the first two already destroyed.
+    let mut plan: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
     for worktree_path in entries {
         match git::engine::owning_bare_repo(&worktree_path).filter(|p| p.is_dir()) {
             Some(bare_repo_path) => {
                 if !force {
                     git::engine::ensure_branch_disposable(&bare_repo_path, &full_branch)?;
+                    if git::engine::worktree_dirty(&worktree_path)? {
+                        return Err(anyhow!(
+                            "Worktree at {:?} has uncommitted changes; use --force to discard them",
+                            worktree_path
+                        ));
+                    }
                 }
-                let _lock = lock::lock_repo(&bare_repo_path)?;
-                git::engine::remove_worktree(&bare_repo_path, &worktree_path, force)?;
-                if !keep_branch {
-                    git::engine::delete_branch(&bare_repo_path, &full_branch)?;
-                }
+                plan.push((worktree_path, Some(bare_repo_path)));
             }
-            None if force => fs::remove_dir_all(&worktree_path)?,
+            None if force => plan.push((worktree_path, None)),
             None => {
                 return Err(anyhow!(
                     "{:?} is not a linked worktree — use --force to delete anyway",
                     worktree_path
                 ));
             }
+        }
+    }
+
+    // Execution phase: all checks passed above, so removals run forced.
+    for (worktree_path, bare_repo_path) in plan {
+        match bare_repo_path {
+            Some(bare_repo_path) => {
+                let _lock = lock::lock_repo(&bare_repo_path)?;
+                git::engine::remove_worktree(&bare_repo_path, &worktree_path, true)?;
+                if !keep_branch {
+                    git::engine::delete_branch(&bare_repo_path, &full_branch)?;
+                }
+            }
+            None => fs::remove_dir_all(&worktree_path)?,
         }
     }
     fs::remove_dir_all(&set_dir)?;
@@ -577,6 +652,7 @@ pub fn branch_delete(ctx: &Context, name: &str, force: bool, keep_branch: bool) 
 /// state.toml so `sync` keeps refreshing the active view.
 pub fn view(ctx: &Context, target: &str) -> Result<()> {
     let root = workspace_root(ctx)?;
+    let _space_lock = lock::lock_space(&root)?;
     let manifest = WorkspaceManifest::load(&space_config_path(&root))?;
 
     let view = if target == "trunk" {
@@ -706,7 +782,9 @@ pub struct RepoStatus {
     pub identity: String,
     pub path: PathBuf,
     pub present: bool,
-    pub dirty: bool,
+    /// None = state could not be determined (unreadable/damaged worktree, or
+    /// not present). Never silently reported as clean.
+    pub dirty: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -721,9 +799,11 @@ pub struct BranchSetStatus {
 pub struct BranchRepoStatus {
     pub name: String,
     pub path: PathBuf,
-    pub dirty: bool,
+    /// None = state could not be determined.
+    pub dirty: Option<bool>,
     /// Commits neither merged into trunk nor pushed to origin.
-    pub needs_push: bool,
+    /// None = state could not be determined.
+    pub needs_push: Option<bool>,
 }
 
 /// Collects the status snapshot for one space.
@@ -734,9 +814,17 @@ pub fn space_status(space_root: &Path) -> Result<SpaceStatus> {
 
     let mut repos = Vec::new();
     for (name, identity) in &manifest.repositories {
+        // Manifest keys are hand-editable; never stat a path built from an
+        // invalid one (a traversal key would make status inspect paths
+        // outside the space).
+        let valid = is_valid_component(name);
         let path = space_root.join(name);
-        let present = path.is_dir();
-        let dirty = present && git::engine::worktree_dirty(&path).unwrap_or(false);
+        let present = valid && path.is_dir();
+        let dirty = if present {
+            git::engine::worktree_dirty(&path).ok()
+        } else {
+            None
+        };
         repos.push(RepoStatus {
             name: name.clone(),
             identity: identity.clone(),
@@ -775,11 +863,10 @@ pub fn space_status(space_root: &Path) -> Result<SpaceStatus> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let dirty = git::engine::worktree_dirty(&worktree_path).unwrap_or(false);
+                let dirty = git::engine::worktree_dirty(&worktree_path).ok();
                 let needs_push = git::engine::owning_bare_repo(&worktree_path)
                     .filter(|p| p.is_dir())
-                    .map(|bare| git::engine::branch_needs_push(&bare, &branch).unwrap_or(false))
-                    .unwrap_or(false);
+                    .and_then(|bare| git::engine::branch_needs_push(&bare, &branch).ok());
                 set_repos.push(BranchRepoStatus {
                     name: repo_name,
                     path: worktree_path,
@@ -833,8 +920,9 @@ pub fn status(ctx: &Context, all: bool, json: bool) -> Result<()> {
         for r in &s.repos {
             let flags = match (r.present, r.dirty) {
                 (false, _) => "missing",
-                (true, true) => "dirty",
-                (true, false) => "clean",
+                (true, Some(true)) => "dirty",
+                (true, Some(false)) => "clean",
+                (true, None) => "state unknown",
             };
             println!("  {}  {}  {}", r.name, r.identity, flags);
         }
@@ -842,11 +930,15 @@ pub fn status(ctx: &Context, all: bool, json: bool) -> Result<()> {
             println!("  branch {} ({})", set.name, set.branch);
             for r in &set.repos {
                 let mut flags = Vec::new();
-                if r.dirty {
-                    flags.push("dirty");
+                match r.dirty {
+                    Some(true) => flags.push("dirty"),
+                    Some(false) => {}
+                    None => flags.push("state unknown"),
                 }
-                if r.needs_push {
-                    flags.push("needs push");
+                match r.needs_push {
+                    Some(true) => flags.push("needs push"),
+                    Some(false) => {}
+                    None => flags.push("push state unknown"),
                 }
                 if flags.is_empty() {
                     flags.push("clean");

@@ -202,12 +202,31 @@ pub fn add_worktree(bare_repo_path: &Path, worktree_path: &Path, at: Option<Oid>
 
     let commit = repo.find_commit(oid)?;
     let scratch = repo.branch(&name, &commit, false)?;
-    let mut opts = WorktreeAddOptions::new();
-    opts.reference(Some(scratch.get()));
-    let worktree = repo.worktree(&name, worktree_path, Some(&opts))?;
+    let created = (|| -> Result<()> {
+        let mut opts = WorktreeAddOptions::new();
+        opts.reference(Some(scratch.get()));
+        let worktree = repo.worktree(&name, worktree_path, Some(&opts))?;
 
-    let worktree_repo = Repository::open_from_worktree(&worktree)?;
-    worktree_repo.set_head_detached(oid)?;
+        let worktree_repo = Repository::open_from_worktree(&worktree)?;
+        worktree_repo.set_head_detached(oid)?;
+        Ok(())
+    })();
+
+    if created.is_err() {
+        // Roll back so a failed creation cannot leave a scratch branch (the
+        // cache invariant reserves local heads for branch sets) or a partial
+        // registration behind. Worktree first — a checked-out branch is
+        // undeletable.
+        if let Ok(partial) = repo.find_worktree(&name) {
+            let mut opts = WorktreePruneOptions::new();
+            opts.valid(true).working_tree(true).locked(true);
+            let _ = partial.prune(Some(&mut opts));
+        }
+        if let Ok(mut branch) = repo.find_branch(&name, BranchType::Local) {
+            let _ = branch.delete();
+        }
+        return created;
+    }
 
     repo.find_branch(&name, BranchType::Local)?.delete()?;
     Ok(())

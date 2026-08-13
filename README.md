@@ -76,7 +76,7 @@ The space root contains only the canonical repo views — that's what you open i
 *   `myspace add <target>` — resolve, clone/reuse the cache, and provision a trunk view.
 *   `myspace remove <name> [--force]` — tear down one worktree and drop it from the manifest; refuses to discard uncommitted changes without `--force`.
 
-Targets come in three forms — bare, Bazel-style shorts, and raw git URLs — and any form takes an `@ref` suffix:
+Targets come in three forms — bare, Bazel-style shorts, and raw git URLs. (An `@ref` suffix is parsed on any form but reserved for pinned dependency checkouts, which are not implemented yet — `add` rejects it for now.)
 
 *   `myspace add mytool` — `git@github.com:zogger-dev/mytool.git` (default host + org).
 *   `myspace add //gh/apache:impala` — `git@github.com:apache/impala.git` (alias `gh` in the host slot).
