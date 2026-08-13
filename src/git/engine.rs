@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
+use git2::{Cred, FetchOptions, FetchPrune, RemoteCallbacks, Repository, build::RepoBuilder};
 use indicatif::ProgressBar;
 use std::path::Path;
-use git2::{Repository, FetchOptions, build::RepoBuilder, RemoteCallbacks, FetchPrune, Cred};
 
 fn create_fetch_options<'a>(spinner: Option<&'a ProgressBar>) -> FetchOptions<'a> {
     let mut callbacks = RemoteCallbacks::new();
@@ -29,7 +29,11 @@ fn create_fetch_options<'a>(spinner: Option<&'a ProgressBar>) -> FetchOptions<'a
 }
 
 /// Bare clones a git repository into the specified cache directory.
-pub async fn clone_bare(repo_url: &str, cache_path: &Path, spinner: Option<&ProgressBar>) -> Result<()> {
+pub async fn clone_bare(
+    repo_url: &str,
+    cache_path: &Path,
+    spinner: Option<&ProgressBar>,
+) -> Result<()> {
     if cache_path.exists() {
         let repo_url = repo_url.to_string();
         let cache_path = cache_path.to_path_buf();
@@ -37,12 +41,18 @@ pub async fn clone_bare(repo_url: &str, cache_path: &Path, spinner: Option<&Prog
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             let repo = Repository::open_bare(&cache_path)?;
-            let mut remote = repo.find_remote("origin")
+            let mut remote = repo
+                .find_remote("origin")
                 .or_else(|_| repo.remote_anonymous(&repo_url))?;
             let mut fetch_options = create_fetch_options(spinner_cloned.as_ref());
-            remote.fetch(&["+refs/heads/*:refs/heads/*"], Some(&mut fetch_options), None)?;
+            remote.fetch(
+                &["+refs/heads/*:refs/heads/*"],
+                Some(&mut fetch_options),
+                None,
+            )?;
             Ok(())
-        }).await??;
+        })
+        .await??;
 
         return Ok(());
     }
@@ -54,18 +64,21 @@ pub async fn clone_bare(repo_url: &str, cache_path: &Path, spinner: Option<&Prog
     tokio::task::spawn_blocking(move || -> Result<()> {
         let fetch_options = create_fetch_options(spinner_cloned.as_ref());
         let mut builder = RepoBuilder::new();
-        builder
-            .bare(true)
-            .fetch_options(fetch_options);
+        builder.bare(true).fetch_options(fetch_options);
         builder.clone(&repo_url, &cache_path)?;
         Ok(())
-    }).await??;
+    })
+    .await??;
 
     Ok(())
 }
 
 /// Creates a new worktree from a bare repository into a target path.
-pub async fn add_worktree(bare_repo_path: &Path, worktree_path: &Path, _spinner: Option<&ProgressBar>) -> Result<()> {
+pub async fn add_worktree(
+    bare_repo_path: &Path,
+    worktree_path: &Path,
+    _spinner: Option<&ProgressBar>,
+) -> Result<()> {
     let status = tokio::process::Command::new("git")
         .arg("worktree")
         .arg("add")
