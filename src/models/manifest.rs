@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkspaceManifest {
     pub workspace: WorkspaceDetails,
+    // BTreeMap so serialization order is deterministic — users may keep
+    // myspace.toml under version control, and a HashMap would reorder
+    // entries on every save.
     #[serde(default)]
-    pub repositories: HashMap<String, String>,
+    pub repositories: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

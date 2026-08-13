@@ -1,48 +1,43 @@
 use anyhow::{Result, anyhow};
-use directories::ProjectDirs;
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-fn get_project_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("com", "myspace", "myspace")
-        .ok_or_else(|| anyhow!("Could not determine project directories"))
-}
-
-pub fn get_config_dir() -> Result<PathBuf> {
-    let dirs = get_project_dirs()?;
-    let path = dirs.config_dir().to_path_buf();
-    if !path.exists() {
-        fs::create_dir_all(&path)?;
+/// Root for all machine-global myspace state: `$MYSPACE_HOME` if set,
+/// otherwise `~/.myspace`. A flat, predictable location on every platform
+/// (cargo/rustup convention) rather than the OS application-support dirs.
+pub fn myspace_home() -> Result<PathBuf> {
+    if let Ok(home) = env::var("MYSPACE_HOME")
+        && !home.is_empty()
+    {
+        return Ok(PathBuf::from(home));
     }
-    Ok(path)
+    dirs::home_dir()
+        .map(|home| home.join(".myspace"))
+        .ok_or_else(|| anyhow!("Could not determine the home directory"))
 }
 
-pub fn get_data_dir() -> Result<PathBuf> {
-    let dirs = get_project_dirs()?;
-    let path = dirs.data_dir().to_path_buf();
-    if !path.exists() {
-        fs::create_dir_all(&path)?;
-    }
-    Ok(path)
+/// Path of the global config file. Not created on demand — a missing config
+/// is a meaningful state (see GlobalConfig::load).
+pub fn get_config_path() -> Result<PathBuf> {
+    Ok(myspace_home()?.join("config.toml"))
 }
 
-pub fn get_state_dir() -> Result<PathBuf> {
-    let dirs = get_project_dirs()?;
-    let path = dirs
-        .state_dir()
-        .unwrap_or_else(|| dirs.data_dir())
-        .to_path_buf();
-    if !path.exists() {
-        fs::create_dir_all(&path)?;
-    }
-    Ok(path)
-}
-
+/// Directory holding the shared bare-repo cache, laid out as
+/// `<host>/<org>/<repo>`.
 pub fn get_bare_repos_dir() -> Result<PathBuf> {
-    let mut data_dir = get_data_dir()?;
-    data_dir.push("repos");
-    if !data_dir.exists() {
-        fs::create_dir_all(&data_dir)?;
+    let path = myspace_home()?.join("repos");
+    if !path.exists() {
+        fs::create_dir_all(&path)?;
     }
-    Ok(data_dir)
+    Ok(path)
+}
+
+/// Directory for rotating log files.
+pub fn get_logs_dir() -> Result<PathBuf> {
+    let path = myspace_home()?.join("logs");
+    if !path.exists() {
+        fs::create_dir_all(&path)?;
+    }
+    Ok(path)
 }
