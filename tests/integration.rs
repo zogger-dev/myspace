@@ -589,6 +589,24 @@ fn remove_without_force_refuses_dirty_worktree() {
 }
 
 #[test]
+fn remove_refuses_orphaned_worktree_without_force() {
+    let env = test_env();
+    let resolved = make_remote(&env);
+    let (ctx, ws) = make_workspace(&env, "ws");
+    ops::add_resolved(&ctx, &ws, &resolved, None, None).unwrap();
+
+    // Cache gone → no dirty-check possible → unforced removal must refuse
+    // rather than silently discard whatever is in the checkout.
+    fs::remove_dir_all(env.root.join("cache/local/testorg/myrepo")).unwrap();
+    let err = ops::remove(&ctx, "myrepo", false).unwrap_err();
+    assert!(err.to_string().contains("--force"), "{}", err);
+    assert!(ws.join("myrepo/README.md").exists());
+
+    ops::remove(&ctx, "myrepo", true).unwrap();
+    assert!(!ws.join("myrepo").exists());
+}
+
+#[test]
 fn remove_reconciles_hand_deleted_worktree() {
     let env = test_env();
     let resolved = make_remote(&env);

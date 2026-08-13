@@ -379,15 +379,21 @@ pub fn remove(ctx: &Context, name: &str, force: bool) -> Result<()> {
 }
 
 /// Removes a worktree directory, deregistering it from its owning bare repo
-/// when it is a linked worktree, or falling back to a plain delete when the
-/// bare repo is gone.
+/// when it is a linked worktree. When the bare repo is gone or damaged no
+/// dirty-check is possible, so plain deletion requires `force` — the
+/// no-silent-data-loss guarantee holds even for orphaned checkouts.
 fn remove_worktree_dir(worktree_path: &Path, force: bool) -> Result<()> {
     match git::engine::owning_bare_repo(worktree_path).filter(|p| p.is_dir()) {
         Some(bare_repo_path) => {
             let _lock = lock::lock_repo(&bare_repo_path)?;
             git::engine::remove_worktree(&bare_repo_path, worktree_path, force)
         }
-        None => Ok(fs::remove_dir_all(worktree_path)?),
+        None if force => Ok(fs::remove_dir_all(worktree_path)?),
+        None => Err(anyhow!(
+            "{:?} is not a linked worktree (its cache may be missing or damaged), so \
+             local changes cannot be checked — use --force to delete it anyway",
+            worktree_path
+        )),
     }
 }
 
